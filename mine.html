@@ -1,0 +1,230 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSE Stock Dashboard</title>
+
+
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; margin: 18px; }
+      .wrap { max-width: 1100px; margin: 0 auto; }
+      h1 { margin: 0 0 10px; font-size: 20px; }
+      .sub { margin: 0 0 14px; color: #444; font-size: 13px; }
+      .pill { display: inline-block; padding: 4px 8px; border: 1px solid #bbb; border-radius: 999px; font-size: 12px; }
+      .ok { background: #f0fff2; }
+      .bad { background: #fff0f0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #ddd; padding: 8px 10px; font-size: 13px; }
+      th { background: #f7f7f7; text-align: left; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .right { text-align: right; }
+      .sparkCell { width: 420px; }
+      .sparkBox { width: 400px; height: 40px; }
+      .muted { color: #666; font-size: 12px; }
+      .rowName { font-weight: 600; }
+    </style>
+  </head>
+
+  <body>
+    <div class="wrap">
+      <div id="root"></div>
+    </div>
+
+    <script type="text/babel">
+
+      class FixedQueue {
+        constructor(max = 500) {
+          this.max = max;
+          this.arr = [];
+        }
+        push(v) {
+          this.arr.push(v);
+          if (this.arr.length > this.max) this.arr.shift();
+        }
+        values() {
+          return this.arr;
+        }
+        size() {
+          return this.arr.length;
+        }
+      }
+
+      function drawSparkline(containerId, values) {
+        const el = document.getElementById(containerId);
+        if (!el) return;
+
+        d3.select(el).selectAll("*").remove();
+
+        const w = el.clientWidth || 400;
+        const h = el.clientHeight || 40;
+
+        if (!values || values.length < 2) {
+
+          const svg0 = d3.select(el).append("svg").attr("width", w).attr("height", h);
+          svg0.append("text")
+            .attr("x", 8).attr("y", 24)
+            .attr("font-size", 11)
+            .text("waiting…");
+          return;
+        }
+
+        const x = d3.scaleLinear()
+          .domain([0, values.length - 1])
+          .range([6, w - 6]);
+
+        const minV = d3.min(values);
+        const maxV = d3.max(values);
+        const pad = (maxV - minV) * 0.08 || 1;
+
+        const y = d3.scaleLinear()
+          .domain([minV - pad, maxV + pad])
+          .range([h - 6, 6]);
+
+        const line = d3.line()
+          .x((d, i) => x(i))
+          .y((d) => y(d));
+
+        const svg = d3.select(el)
+          .append("svg")
+          .attr("width", w)
+          .attr("height", h);
+
+
+        svg.append("line")
+          .attr("x1", 6).attr("x2", w - 6)
+          .attr("y1", h - 6).attr("y2", h - 6)
+          .attr("stroke-width", 1)
+          .attr("stroke", "#bbb");
+
+   
+        svg.append("path")
+          .datum(values)
+          .attr("d", line)
+          .attr("fill", "none")
+          .attr("stroke", "#111")
+          .attr("stroke-width", 1.25);
+
+        svg.append("circle")
+          .attr("cx", x(values.length - 1))
+          .attr("cy", y(values[values.length - 1]))
+          .attr("r", 2.4)
+          .attr("fill", "#111");
+      }
+
+      function StockRow({ data, sparkId }) {
+        return (
+          <tr>
+            <td className="mono">{data.ticker}</td>
+            <td className="rowName">{data.name}</td>
+            <td className="right mono">{data.price}</td>
+            <td className="right mono">{data.volume}</td>
+            <td className="sparkCell">
+              <div id={sparkId} className="sparkBox"></div>
+            </td>
+          </tr>
+        );
+      }
+
+      function App() {
+
+        const [ibm, setIbm]     = React.useState({ ticker: "IBM",    name: "—", price: 0, volume: 0 });
+        const [amzn, setAmzn]   = React.useState({ ticker: "AMZN",   name: "—", price: 0, volume: 0 });
+        const [dow, setDow]     = React.useState({ ticker: "DOW",    name: "—", price: 0, volume: 0 });
+        const [nasdaq, setNas]  = React.useState({ ticker: "NASDAQ", name: "—", price: 0, volume: 0 });
+
+        const [status, setStatus] = React.useState("disconnected");
+
+  
+        const qIBM = React.useRef(new FixedQueue(500));
+        const qAMZN = React.useRef(new FixedQueue(500));
+        const qDOW = React.useRef(new FixedQueue(500));
+        const qNAS = React.useRef(new FixedQueue(500));
+
+        React.useEffect(() => {
+
+          const url = "http://127.0.0.1:31415/stocks";
+          const es = new EventSource(url);
+
+          es.onopen = () => setStatus("connected");
+
+          es.onmessage = (evt) => {
+            setStatus("connected");
+
+            let payload;
+            try {
+              payload = JSON.parse(evt.data);
+            } catch (e) {
+              console.warn("Bad JSON from SSE:", evt.data);
+              return;
+            }
+
+            const ticker = payload.ticker;
+
+
+            if (ticker === "IBM") {
+              setIbm(payload);
+              qIBM.current.push(Number(payload.price));
+              drawSparkline("spark-IBM", qIBM.current.values());
+            } else if (ticker === "AMZN") {
+              setAmzn(payload);
+              qAMZN.current.push(Number(payload.price));
+              drawSparkline("spark-AMZN", qAMZN.current.values());
+            } else if (ticker === "DOW") {
+              setDow(payload);
+              qDOW.current.push(Number(payload.price));
+              drawSparkline("spark-DOW", qDOW.current.values());
+            } else if (ticker === "NASDAQ") {
+              setNas(payload);
+              qNAS.current.push(Number(payload.price));
+              drawSparkline("spark-NASDAQ", qNAS.current.values());
+            }
+          };
+
+          es.onerror = () => setStatus("error");
+
+          return () => es.close();
+        }, []);
+
+        const badgeClass = status === "connected" ? "pill ok" : "pill bad";
+
+        return (
+          <div>
+            <h1> Stock Dashboard</h1>
+            <p className="sub">
+         
+              <br />
+            </p>
+
+            <table>
+              <thead>
+                <tr>
+                  <th style={{width: "90px"}}>Ticker</th>
+                  <th>Name</th>
+                  <th style={{width: "120px"}} className="right">Price</th>
+                  <th style={{width: "120px"}} className="right">Volume</th>
+                  <th style={{width: "420px"}}>Sparkline</th>
+                </tr>
+              </thead>
+              <tbody>
+                <StockRow data={ibm}   sparkId="spark-IBM" />
+                <StockRow data={amzn}  sparkId="spark-AMZN" />
+                <StockRow data={dow}   sparkId="spark-DOW" />
+                <StockRow data={nasdaq} sparkId="spark-NASDAQ" />
+              </tbody>
+            </table>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
